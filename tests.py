@@ -225,6 +225,59 @@ server{
 TESTBLOCK_CASE_14 = """user  nginx;"""
 
 
+TESTBLOCK_CASE_15 = """
+location /rewrite {
+    set $xlocation 'test';
+    internal;
+    rewrite_by_lua '
+        local var = ngx.var.uri
+    ';
+}
+"""
+
+TESTBLOCK_CASE_16 = """
+location /test {
+    set $xlocation 'test';
+    content_by_lua_block {
+        ngx.say("Hello, world!")
+    }
+}
+"""
+TESTBLOCK_CASE_17 = """
+location = /info
+        {
+        default_type 'text/html';
+        access_log off;
+        client_max_body_size 1k;
+        content_by_lua_block
+        {
+            ngx.say("{\"status\":\"ok\"}")
+        }
+    }
+location /test {
+    set $xlocation 'test';
+    content_by_lua_block {
+        ngx.say("Hello, world!")
+    }
+}
+"""
+
+TESTBLOCK_CASE_17_dumps_string = """location = /info {
+    default_type 'text/html';
+    access_log off;
+    client_max_body_size 1k;
+    content_by_lua_block {
+            ngx.say("{"status":"ok"}")
+        }
+}
+
+location /test {
+    set $xlocation 'test';
+    content_by_lua_block {
+        ngx.say("Hello, world!")
+    }
+}"""
+
 class TestPythonNginx(unittest.TestCase):
     def test_basic_load(self):
         self.assertTrue(nginx.loads(TESTBLOCK_CASE_1) is not None)
@@ -354,6 +407,37 @@ class TestPythonNginx(unittest.TestCase):
         self.assertTrue(nginx.loads(TESTBLOCK_CASE_13) is not None)
         self.assertTrue(nginx.loads(TESTBLOCK_CASE_14) is not None)
 
+    def test_lua_load(self):
+        data = nginx.loads(TESTBLOCK_CASE_15)
+        self.assertEqual(len(data.filter("Location")), 1)
+        location_children = data.filter("Location")[0].children
+        self.assertEqual(len(location_children), 3)
+        self.assertEqual(location_children[2].name, "rewrite_by_lua")
+        self.assertEqual(location_children[2].value, "'\n        local var = ngx.var.uri\n    '")
+
+        data = nginx.loads(TESTBLOCK_CASE_16)
+        self.assertEqual(len(data.filter("Location")), 1)
+        location_children = data.filter("Location")[0].children
+        self.assertEqual(len(location_children), 2)
+        self.assertEqual(location_children[1].name, "content_by_lua_block")
+        self.assertEqual(location_children[1].value, '{\n        ngx.say("Hello, world!")\n    }')
+
+        data = nginx.loads(TESTBLOCK_CASE_17)
+        self.assertEqual(len(data.filter("Location")), 2)
+        location_children = data.filter("Location")[0].children
+        self.assertEqual(len(location_children), 4)
+        self.assertEqual(location_children[3].name, "content_by_lua_block")
+        self.assertEqual(location_children[3].value, '{\n            ngx.say("{\"status\":\"ok\"}")\n        }')
+
+    def test_lua_dump(self):
+        data = nginx.loads(TESTBLOCK_CASE_15)
+        self.assertEqual(nginx.dumps(data).strip(), TESTBLOCK_CASE_15.strip())
+
+        data = nginx.loads(TESTBLOCK_CASE_16)
+        self.assertEqual(nginx.dumps(data).strip(), TESTBLOCK_CASE_16.strip())
+
+        data = nginx.loads(TESTBLOCK_CASE_17)
+        self.assertEqual(nginx.dumps(data).strip(), TESTBLOCK_CASE_17_dumps_string)
 
 if __name__ == '__main__':
     unittest.main()
