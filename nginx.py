@@ -401,6 +401,10 @@ class Key(object):
     @property
     def as_strings(self):
         """Return key as nginx config string."""
+        if type(self.value) == str:
+            m = re.compile(r'.*_by_lua_block').search(self.name)
+            if m:
+                return '{0} {1}\n'.format(self.name, self.value)
         if self.value == '' or self.value is None:
             return '{0};\n'.format(self.name)
         if type(self.value) == str and '"' not in self.value and (';' in self.value or '#' in self.value):
@@ -418,9 +422,78 @@ def loads(data, conf=True):
     f = Conf() if conf else []
     lopen = []
     index = 0
+    end_index = 0
+    step = 1000
+
+    is_lua = False
+    lua_open = '{'
+    lua_key = ''
+    lua_content = ''
+    lua_block_stack = 0
 
     while True:
-        m = re.compile(r'^\s*events\s*{').search(data[index:])
+        old_end_index = end_index
+        end_index = min(len(data), index + step)
+        search_data = data[index:end_index]
+
+        if is_lua and lua_open == '{':
+            open_m = re.compile(r'{').search(search_data)
+            m = re.compile(r'}').search(search_data)
+            if (open_m and not m) or (open_m and m and open_m.end() < m.end()):
+                log.debug("lua block has {, stack count + 1")
+                lua_block_stack += 1
+                lua_content += data[index:index+open_m.end()]
+                index += open_m.end()
+                continue
+
+            if m:
+                log.debug("find lua block close")
+                if lua_block_stack > 0:
+                    log.debug("but lua block is not end")
+                    lua_block_stack -= 1
+                    lua_content += data[index:index+m.end()]
+                    index += m.end()
+                    continue
+
+                lua_content += data[index:index+m.end()]
+                k = Key(lua_key, lua_content)
+                log.debug("Key {0} {1}".format(lua_key, lua_content))
+                if lopen and isinstance(lopen[0], (Container, Server)):
+                    lopen[0].add(k)
+                else:
+                    f.add(k) if conf else f.append(k)
+                lua_content = ''
+                is_lua = False
+                index += m.end()
+            else:
+                log.debug("curent slice all between lua script")
+                lua_content += search_data
+                break
+                index = end_index
+            continue
+
+        if is_lua and lua_open == '\'':
+            m = re.compile(r'(\')\s*;').search(search_data)
+            if m:
+                log.debug("find lua block close")
+                lua_content += data[index:index+m.end(1)]
+                k = Key(lua_key, lua_content)
+                log.debug("Key {0} {1}".format(lua_key, lua_content))
+                if lopen and isinstance(lopen[0], (Container, Server)):
+                    lopen[0].add(k)
+                else:
+                    f.add(k) if conf else f.append(k)
+                lua_content = ''
+                is_lua = False
+                index += m.end()
+            else:
+                log.debug("curent slice all between lua script")
+                lua_content += search_data
+                index = end_index
+            continue
+
+        
+        m = re.compile(r'^\s*events\s*{').search(search_data)
         if m:
             log.debug("Open (Events)")
             e = Events()
@@ -428,7 +501,7 @@ def loads(data, conf=True):
             index += m.end()
             continue
 
-        m = re.compile(r'^\s*http\s*{').search(data[index:])
+        m = re.compile(r'^\s*http\s*{').search(search_data)
         if m:
             log.debug("Open (Http)")
             h = Http()
@@ -436,7 +509,7 @@ def loads(data, conf=True):
             index += m.end()
             continue
 
-        m = re.compile(r'^\s*stream\s*{').search(data[index:])
+        m = re.compile(r'^\s*stream\s*{').search(search_data)
         if m:
             log.debug("Open (Stream)")
             s = Stream()
@@ -444,7 +517,7 @@ def loads(data, conf=True):
             index += m.end()
             continue
 
-        m = re.compile(r'^\s*server\s*{').search(data[index:])
+        m = re.compile(r'^\s*server\s*{').search(search_data)
         if m:
             log.debug("Open (Server)")
             s = Server()
@@ -453,7 +526,7 @@ def loads(data, conf=True):
             continue
 
         n = re.compile(r'(?!\B"[^"]*);(?![^"]*"\B)')
-        m = re.compile(r'^\s*location\s+(.*?".*?".*?|.*?)\s*{').search(data[index:])
+        m = re.compile(r'^\s*location\s+(.*?".*?".*?|.*?)\s*{').search(search_data)
         if m and not n.search(m.group()):
             log.debug("Open (Location) {0}".format(m.group(1)))
             l = Location(m.group(1))
@@ -461,7 +534,7 @@ def loads(data, conf=True):
             index += m.end()
             continue
 
-        m = re.compile(r'^\s*if\s+(.*?".*?".*?|.*?)\s*{').search(data[index:])
+        m = re.compile(r'^\s*if\s+(.*?".*?".*?|.*?)\s*{').search(search_data)
         if m and not n.search(m.group()):
             log.debug("Open (If) {0}".format(m.group(1)))
             ifs = If(m.group(1))
@@ -469,7 +542,7 @@ def loads(data, conf=True):
             index += m.end()
             continue
 
-        m = re.compile(r'^\s*upstream\s+(.*?)\s*{').search(data[index:])
+        m = re.compile(r'^\s*upstream\s+(.*?)\s*{').search(search_data)
         if m and not n.search(m.group()):
             log.debug("Open (Upstream) {0}".format(m.group(1)))
             u = Upstream(m.group(1))
@@ -477,7 +550,7 @@ def loads(data, conf=True):
             index += m.end()
             continue
 
-        m = re.compile(r'^\s*geo\s+(.*?".*?".*?|.*?)\s*{').search(data[index:])
+        m = re.compile(r'^\s*geo\s+(.*?".*?".*?|.*?)\s*{').search(search_data)
         if m and not n.search(m.group()):
             log.debug("Open (Geo) {0}".format(m.group(1)))
             g = Geo(m.group(1))
@@ -485,7 +558,7 @@ def loads(data, conf=True):
             index += m.end()
             continue
 
-        m = re.compile(r'^\s*map\s+(.*?".*?".*?|.*?)\s*{').search(data[index:])
+        m = re.compile(r'^\s*map\s+(.*?".*?".*?|.*?)\s*{').search(search_data)
         if m and not n.search(m.group()):
             log.debug("Open (Map) {0}".format(m.group(1)))
             g = Map(m.group(1))
@@ -493,7 +566,7 @@ def loads(data, conf=True):
             index += m.end()
             continue
 
-        m = re.compile(r'^\s*limit_except\s+(.*?".*?".*?|.*?)\s*{').search(data[index:])
+        m = re.compile(r'^\s*limit_except\s+(.*?".*?".*?|.*?)\s*{').search(search_data)
         if m and not n.search(m.group()):
             log.debug("Open (LimitExcept) {0}".format(m.group(1)))
             l = LimitExcept(m.group(1))
@@ -501,7 +574,7 @@ def loads(data, conf=True):
             index += m.end()
             continue
 
-        m = re.compile(r'^\s*types\s*{').search(data[index:])
+        m = re.compile(r'^\s*types\s*{').search(search_data)
         if m:
             log.debug("Open (Types)")
             l = Types()
@@ -509,7 +582,7 @@ def loads(data, conf=True):
             index += m.end()
             continue
 
-        m = re.compile(r'^(\s*)#[ \r\t\f]*(.*?)\n').search(data[index:])
+        m = re.compile(r'^(\s*)#[ \r\t\f]*(.*?)\n').search(search_data)
         if m:
             log.debug("Comment ({0})".format(m.group(2)))
             c = Comment(m.group(2), inline='\n' not in m.group(1))
@@ -520,7 +593,27 @@ def loads(data, conf=True):
             index += m.end() - 1
             continue
 
-        m = re.compile(r'^\s*}').search(data[index:])
+        m = re.compile(r'^\s*(.*_by_lua_block)\s*{').search(search_data)
+        if m:
+            log.debug("lua block, { open")
+            lua_key = m.group(1)
+            is_lua = True
+            lua_open = '{'
+            lua_content = "{"
+            index += m.end()
+            continue
+
+        m = re.compile(r'^\s*(.*_by_lua)\s+\'').search(search_data)
+        if m:
+            log.debug("lua block, ' open")
+            lua_key = m.group(1)
+            is_lua = True
+            lua_open = '\''
+            lua_content = "\'"
+            index += m.end()
+            continue
+
+        m = re.compile(r'^\s*}').search(search_data)
         if m:
             if isinstance(lopen[0], Container):
                 log.debug("Close ({0})".format(lopen[0].__class__.__name__))
@@ -533,18 +626,22 @@ def loads(data, conf=True):
             index += m.end()
             continue
 
-        if ";" not in data[index:] and "}" in data[index:]:
+        if ";" not in search_data and "}" in search_data:
             # If there is still something to parse, expect ';' otherwise
             # the Key regexp can get stuck due to regexp catastrophic backtracking
-            raise ParseError("Config syntax, missing ';' at index: {}".format(index))
+            if old_end_index == end_index:
+                raise ParseError("Config syntax, missing ';' at index: {}".format(index))
+            step += 1000
+            continue
 
         double = r'\s*"[^"]*"'
         single = r'\s*\'[^\']*\''
         normal = r'\s*[^;\s]*'
         s1 = r'{}|{}|{}'.format(double, single, normal)
         s = r'^\s*({})\s*((?:{})+);'.format(s1, s1)
-        m = re.compile(s).search(data[index:])
+        m = re.compile(s).search(search_data)
         if m:
+            log.debug(data[index:index+m.end()])
             log.debug("Key {0} {1}".format(m.group(1), m.group(2)))
             k = Key(m.group(1), m.group(2))
             if lopen and isinstance(lopen[0], (Container, Server)):
@@ -554,7 +651,7 @@ def loads(data, conf=True):
             index += m.end()
             continue
 
-        m = re.compile(r'^\s*(\S+);').search(data[index:])
+        m = re.compile(r'^\s*(\S+);').search(search_data)
         if m:
             log.debug("Key {0}".format(m.group(1)))
             k = Key(m.group(1), '')
